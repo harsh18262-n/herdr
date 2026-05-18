@@ -178,6 +178,7 @@ automatic detection works out of the box. process name matching plus terminal ou
 | [amp](https://ampcode.com) | ✓ | ✓ | ✓ |
 | [opencode](https://github.com/anomalyco/opencode) | ✓ | ✓ | ✓ |
 | [grok cli](https://x.ai/grok) | ✓ | ✓ | ✓ |
+| [kiro cli](https://kiro.dev) | ✓ | ✓ | ✓ |
 
 detected but not fully tested: gemini cli, cursor agent, cline, kimi, github copilot cli.
 
