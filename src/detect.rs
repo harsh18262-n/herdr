@@ -31,6 +31,7 @@ pub enum Agent {
     Droid,
     Amp,
     Grok,
+    Kiro,
 }
 
 pub fn agent_label(agent: Agent) -> &'static str {
@@ -47,6 +48,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Droid => "droid",
         Agent::Amp => "amp",
         Agent::Grok => "grok",
+        Agent::Kiro => "kiro",
     }
 }
 
@@ -65,6 +67,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "droid" => Some(Agent::Droid),
         "amp" | "amp-local" => Some(Agent::Amp),
         "grok" | "grok-build" => Some(Agent::Grok),
+        "kiro" | "kiro-cli" | "kiro-cli-chat" => Some(Agent::Kiro),
         _ => None,
     }
 }
@@ -87,6 +90,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "droid" => Some(Agent::Droid),
         "amp" | "amp-local" => Some(Agent::Amp),
         "grok" | "grok-build" => Some(Agent::Grok),
+        "kiro" | "kiro-cli" | "kiro-cli-chat" => Some(Agent::Kiro),
         _ => None,
     }
 }
@@ -129,6 +133,7 @@ pub fn detect_state(agent: Option<Agent>, screen_content: &str) -> AgentState {
         Agent::Droid => detect_droid(screen_content),
         Agent::Amp => detect_amp(screen_content),
         Agent::Grok => detect_grok(screen_content),
+        Agent::Kiro => detect_kiro(screen_content),
     }
 }
 
@@ -461,6 +466,34 @@ fn detect_grok(content: &str) -> AgentState {
     AgentState::Idle
 }
 
+/// Kiro CLI detection.
+///
+/// Blocked: tool approval notification bar with "Yes", "Trust", "No" options,
+/// or ⏸ icon indicating pending approval.
+/// Working: spinner + tool title while executing, "Esc" to cancel.
+/// Idle: prompt ready, no spinner or approval bar.
+fn detect_kiro(content: &str) -> AgentState {
+    let lower = content.to_lowercase();
+
+    // Blocked: approval notification bar
+    if (lower.contains("yes") && lower.contains("trust") && lower.contains("no"))
+        || content.contains('\u{23F8}')
+        || lower.contains("pending approval")
+    {
+        return AgentState::Blocked;
+    }
+
+    // Working: spinner or "esc" cancel hint while tool runs
+    if has_braille_spinner(content) {
+        return AgentState::Working;
+    }
+    if lower.contains("esc to cancel") || lower.contains("esc to close") {
+        return AgentState::Working;
+    }
+
+    AgentState::Idle
+}
+
 /// Check for braille spinner characters at the start of a line.
 /// These are the Unicode braille pattern dots used by CLI spinners.
 fn has_braille_spinner(content: &str) -> bool {
@@ -667,6 +700,18 @@ fn wrapped_agent_name_from_cmdline(cmdline: &str) -> Option<String> {
         }
     }
 
+    // Check if any path component in the cmdline matches an agent (e.g. /path/kiro-cli/bun)
+    for token in cmdline.split_whitespace() {
+        let trimmed = token.trim_matches(|c| matches!(c, '"' | '\''));
+        for component in std::path::Path::new(trimmed).iter() {
+            if let Some(s) = component.to_str() {
+                if let Some(agent) = parse_agent_label(s) {
+                    return Some(agent_label(agent).to_string());
+                }
+            }
+        }
+    }
+
     None
 }
 
@@ -731,6 +776,8 @@ mod tests {
         assert_eq!(identify_agent("ghcs"), Some(Agent::GithubCopilot));
         assert_eq!(identify_agent("grok"), Some(Agent::Grok));
         assert_eq!(identify_agent("grok-build"), Some(Agent::Grok));
+        assert_eq!(identify_agent("kiro"), Some(Agent::Kiro));
+        assert_eq!(identify_agent("kiro-cli"), Some(Agent::Kiro));
     }
 
     #[test]
@@ -744,6 +791,8 @@ mod tests {
         );
         assert_eq!(parse_agent_label("amp-local"), Some(Agent::Amp));
         assert_eq!(parse_agent_label("grok-build"), Some(Agent::Grok));
+        assert_eq!(parse_agent_label("kiro"), Some(Agent::Kiro));
+        assert_eq!(parse_agent_label("kiro-cli"), Some(Agent::Kiro));
     }
 
     #[test]
@@ -752,6 +801,7 @@ mod tests {
         assert_eq!(agent_label(Agent::GithubCopilot), "copilot");
         assert_eq!(agent_label(Agent::OpenCode), "opencode");
         assert_eq!(agent_label(Agent::Grok), "grok");
+        assert_eq!(agent_label(Agent::Kiro), "kiro");
     }
 
     #[test]
@@ -1403,6 +1453,50 @@ mod tests {
     fn grok_idle_after_turn_completed() {
         let screen = "yo\n\nTurn completed in 1.7s.\n\n╭────╮\n│ ❯  │\n╰─ gpt-5.4 ─╯";
         assert_eq!(detect_state(Some(Agent::Grok), screen), AgentState::Idle);
+    }
+
+    // ---- Kiro ----
+
+    #[test]
+    fn kiro_identified_by_process_name() {
+        assert_eq!(identify_agent("kiro"), Some(Agent::Kiro));
+        assert_eq!(identify_agent("kiro-cli"), Some(Agent::Kiro));
+    }
+
+    #[test]
+    fn kiro_blocked_on_approval_bar() {
+        let screen = "Reading file src/main.rs\n\n  Yes   Trust   No\n\n❯ ";
+        assert_eq!(detect_state(Some(Agent::Kiro), screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn kiro_blocked_on_pause_icon() {
+        let screen = "⏸ shell: rm -rf /tmp/test\n\n❯ ";
+        assert_eq!(detect_state(Some(Agent::Kiro), screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn kiro_blocked_pending_approval() {
+        let screen = "Pending approval\nshell: cargo build";
+        assert_eq!(detect_state(Some(Agent::Kiro), screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn kiro_working_with_spinner() {
+        let screen = "⠋ Reading file src/detect.rs\n\n❯ ";
+        assert_eq!(detect_state(Some(Agent::Kiro), screen), AgentState::Working);
+    }
+
+    #[test]
+    fn kiro_working_esc_to_cancel() {
+        let screen = "Running shell command\nEsc to cancel";
+        assert_eq!(detect_state(Some(Agent::Kiro), screen), AgentState::Working);
+    }
+
+    #[test]
+    fn kiro_idle_at_prompt() {
+        let screen = "Task complete.\n\n❯ ";
+        assert_eq!(detect_state(Some(Agent::Kiro), screen), AgentState::Idle);
     }
 
     // ---- Helpers ----
